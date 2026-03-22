@@ -1,0 +1,42 @@
+esphome:
+  name: cyphal_node
+  platformio_options:
+
+    lib_extra_dirs:
+      - "+<*>"
+      - H:\Code\esphome_cyphal\components\cyphal\lib\libcanard
+      - H:\Code\esphome_cyphal\components\cyphal\lib\o1heap
+    lib_deps:
+      - libcanard  # 前提是 libcanard 目录结构符合 PlatformIO 库规范
+      - o1heap
+    build_src_filter:
+      - "+<*>"
+
+  build_path: build/cyphal-esp32-node
+  min_version: 2026.3.0
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+external_components:
+  - source:
+      type: local
+      path: components
+logger:
+
+# 配置 CAN 总线（使用内置的 canbus 组件）
+canbus:
+  - id: can_bus
+    platform: esp32_can
+    can_id: 1
+    tx_pin: GPIO5
+    rx_pin: GPIO4
+    bit_rate: 250kbps
+    use_extended_id: true
+
+cyphal:
+  id: my_cyphal
+  canbus_id: can_bus
+  node_id: 42
