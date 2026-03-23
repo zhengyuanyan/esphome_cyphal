@@ -1,7 +1,9 @@
 #include "cyphal_component.h"
 #include "esphome/core/log.h"
+#include "esphome/core/helpers.h"
 #include <cstring>
 #include <stdalign.h>
+
 
 #ifdef ESP_PLATFORM
 #include "esp_timer.h"
@@ -13,7 +15,19 @@ namespace esphome
   {
 
     static const char *const TAG = "cyphal";
-    alignas(O1HEAP_ALIGNMENT) static unsigned char heap_mem[16384];
+    alignas(O1HEAP_ALIGNMENT) static unsigned char heap_mem[16384]; // 16KB 内存池
+
+    // ========== InternalTrigger 实现 ==========
+    CyphalComponent::InternalTrigger::InternalTrigger(canbus::Canbus *parent, CyphalComponent *owner)
+        : canbus::CanbusTrigger(parent, 0, 0, true), owner_(owner) {}
+
+    void CyphalComponent::InternalTrigger::trigger(std::vector<uint8_t> data, uint32_t can_id, bool rtr)
+    {
+      owner_->on_frame_received(can_id, true, rtr, data);
+    }
+
+    // ========== CyphalComponent 实现 ==========
+    CyphalComponent::CyphalComponent() = default;
 
     void *CyphalComponent::allocate(void *user, size_t size)
     {
@@ -44,7 +58,10 @@ namespace esphome
       memcpy(data.data(), frame->payload.data, frame->payload.size);
 
       canbus::Error err = canbus_->send_data(frame->extended_can_id, true, false, data);
-      return (err == canbus::ERROR_OK) ? 1 : -1;
+      if (err == canbus::ERROR_OK)
+        return 1;
+      // 所有非成功情况都返回 0 表示重试（硬件忙或临时错误）
+      return 0;
     }
 
     CanardMicrosecond CyphalComponent::current_micros()
@@ -52,7 +69,7 @@ namespace esphome
 #ifdef ESP_PLATFORM
       return (CanardMicrosecond)esp_timer_get_time();
 #else
-      return micros(); // 32 位，可能溢出，但大多数场景够用
+      return micros();
 #endif
     }
 
@@ -79,25 +96,30 @@ namespace esphome
       // 初始化 TX 队列
       tx_queue_ = canardTxInit(tx_queue_size_, mtu_, mem);
 
-      // 注册 CAN 接收回调
+      // 创建内部触发器，接收所有扩展 ID 帧
       if (canbus_)
       {
-        canbus_->add_callback([this](uint32_t can_id, bool extended_id, bool rtr, const std::vector<uint8_t> &data)
-                              { this->on_frame_received(can_id, extended_id, rtr, data); });
+        auto trigger = std::make_unique<InternalTrigger>(canbus_, this);
+        canbus_->add_trigger(trigger.get());
+        triggers_.push_back(std::move(trigger));
       }
 
-      // 注册订阅
+      // 注册所有订阅
       for (auto &[subject_id, info] : subscriptions_)
       {
-        ESP_LOGCONFIG(TAG, "Registered subscription for subject %u", subject_id);
-        canardRxSubscribe(&ins_, CanardTransferKindMessage, subject_id,
-                          info.sub.extent, info.sub.transfer_id_timeout_usec, &info.sub);
+        ESP_LOGCONFIG(TAG, "Registering subscription for subject %u", subject_id);
+        int8_t res = canardRxSubscribe(&ins_, CanardTransferKindMessage, subject_id,
+                                       info.sub.extent, info.sub.transfer_id_timeout_usec, &info.sub);
+        if (res < 0)
+        {
+          ESP_LOGE(TAG, "Failed to subscribe subject %u: %d", subject_id, res);
+        }
       }
     }
 
     void CyphalComponent::loop()
     {
-      // 定时发布
+      // 处理定时发布器
       uint32_t now = millis();
       for (auto &[subject_id, pub] : timed_publishers_)
       {
@@ -119,11 +141,14 @@ namespace esphome
 
     void CyphalComponent::dump_config()
     {
-      ESP_LOGCONFIG(TAG, "Cyphal Node ID: %u TX Queue: %zu MTU: %zu", node_id_, tx_queue_size_, mtu_);
-      ESP_LOGCONFIG(TAG, "Subscriptions: %zu, Publishers: %zu", subscriptions_.size(), timed_publishers_.size());
+      ESP_LOGCONFIG(TAG, "Cyphal Node ID: %u, TX Queue: %zu, MTU: %zu",
+                    node_id_, tx_queue_size_, mtu_);
+      ESP_LOGCONFIG(TAG, "Subscriptions: %zu, Publishers: %zu",
+                    subscriptions_.size(), timed_publishers_.size());
     }
 
-    void CyphalComponent::add_receive_handler(uint16_t subject_id, size_t extent, uint32_t timeout_us, ReceiveHandler handler)
+    void CyphalComponent::add_receive_handler(uint16_t subject_id, size_t extent, uint32_t timeout_us,
+                                              ReceiveHandler handler)
     {
       SubscriptionInfo info;
       info.sub.extent = extent;
@@ -139,7 +164,7 @@ namespace esphome
       info.interval_ms = interval_ms;
       info.func = func;
       timed_publishers_[subject_id] = info;
-      ESP_LOGCONFIG(TAG, "Added timed publisher for subject %u interval %ums", subject_id, interval_ms);
+      ESP_LOGCONFIG(TAG, "Added timed publisher for subject %u, interval %ums", subject_id, interval_ms);
     }
 
     uint8_t CyphalComponent::get_next_transfer_id(uint16_t subject_id)
@@ -170,7 +195,7 @@ namespace esphome
       canard_payload.size = size;
 
       CanardMicrosecond now_us = current_micros();
-      int32_t result = canardTxPush(&tx_queue_, &ins_, 0, &metadata, canard_payload, now_us, nullptr);
+      int32_t result = canardTxPush(&tx_queue_, &ins_, now_us + 500000, &metadata, canard_payload, now_us, nullptr);
       if (result < 0)
       {
         ESP_LOGW(TAG, "Failed to push subject %u: error %d", subject_id, result);
@@ -180,10 +205,11 @@ namespace esphome
       return true;
     }
 
-    void CyphalComponent::on_frame_received(uint32_t can_id, bool extended_id, bool rtr, const std::vector<uint8_t> &data)
+    void CyphalComponent::on_frame_received(uint32_t can_id, bool extended_id, bool rtr,
+                                            const std::vector<uint8_t> &data)
     {
-      if (!extended_id)
-        return; // Cyphal 使用扩展 ID，忽略标准 ID 帧
+      if (!extended_id || rtr)
+        return; // Cyphal 使用扩展 ID 数据帧
 
       CanardFrame canard_frame;
       canard_frame.extended_can_id = can_id;
@@ -195,6 +221,8 @@ namespace esphome
       if (canardRxAccept(&ins_, current_micros(), &canard_frame, 0, &transfer, &sub) > 0)
       {
         handle_transfer_(transfer);
+        // 释放 payload 内存
+        ins_.memory.deallocate(ins_.memory.user_reference, transfer.payload.allocated_size, transfer.payload.data);
       }
     }
 

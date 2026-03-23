@@ -1,17 +1,14 @@
+# ============================================================
+# ESPHome Cyphal 组件示例配置
+# 使用标准DSDL类型进行CAN总线通信
+# 支持节点模式和网关模式
+# ============================================================
+
 esphome:
-  name: cyphal_node
+  name: cyphal-node
   platformio_options:
-
-    lib_extra_dirs:
-      - "+<*>"
-      - H:\Code\esphome_cyphal\components\cyphal\lib\libcanard
-      - H:\Code\esphome_cyphal\components\cyphal\lib\o1heap
-    lib_deps:
-      - libcanard  # 前提是 libcanard 目录结构符合 PlatformIO 库规范
-      - o1heap
-    build_src_filter:
-      - "+<*>"
-
+    build_flags:
+      - -std=gnu++17
   build_path: build/cyphal-esp32-node
   min_version: 2026.3.0
 
@@ -24,19 +21,452 @@ external_components:
   - source:
       type: local
       path: components
-logger:
 
-# 配置 CAN 总线（使用内置的 canbus 组件）
+logger:
+  level: DEBUG
+
+# ============================================================
+# CAN 总线配置
+# ============================================================
 canbus:
   - id: can_bus
     platform: esp32_can
     can_id: 1
-    tx_pin: GPIO5
-    rx_pin: GPIO4
+    tx_pin: GPIO21
+    rx_pin: GPIO22
     bit_rate: 250kbps
     use_extended_id: true
 
+# ============================================================
+# Cyphal 核心配置 - 节点模式
+# 使用标准DSDL类型进行通信
+# ============================================================
 cyphal:
   id: my_cyphal
   canbus_id: can_bus
   node_id: 42
+  mode: node  # 节点模式 (或 gateway 网关模式)
+  
+  # 心跳配置 (uavcan.node.Heartbeat)
+  heartbeat:
+    subject_id: 7509
+    interval: 1s
+
+  # 订阅示例 - 使用标准DSDL类型
+  # uavcan.primitive.scalar.Real32 - 通用浮点数值
+  subscriptions:
+    - subject_id: 1000
+      extent: 256
+      dsdl_type: "uavcan::primitive::scalar::Real32_1_0"
+      on_receive: |-
+        ESP_LOGD("cyphal", "Received Real32 value: %.2f from node %d", msg.value, remote_node_id);
+    
+    # uavcan.primitive.scalar.Bit - 布尔值
+    - subject_id: 1001
+      extent: 32
+      dsdl_type: "uavcan::primitive::scalar::Bit_1_0"
+      on_receive: |-
+        ESP_LOGD("cyphal", "Received Bit value: %s from node %d", msg.value ? "true" : "false", remote_node_id);
+  
+  # 发布示例 - 使用标准DSDL类型
+  publishers:
+    # 发布浮点数值
+    - subject_id: 2000
+      dsdl_type: "uavcan::primitive::scalar::Real32_1_0"
+      interval: 5s
+      priority: 4
+      payload: msg.value = 25.5f;
+    
+    # 发布布尔值
+    - subject_id: 2001
+      dsdl_type: "uavcan::primitive::scalar::Bit_1_0"
+      interval: 1s
+      priority: 4
+      payload: msg.value = true;
+
+# ============================================================
+# Cyphal 传感器模块示例
+# 通过YAML配置dsdl_type，支持任意传感器类型
+# ============================================================
+sensor:
+  # 本地DHT传感器
+  - platform: dht
+    pin: GPIO13
+    temperature:
+      name: "Local Temperature"
+      id: local_temp
+    humidity:
+      name: "Local Humidity"
+      id: local_humidity
+    update_interval: 10s
+  
+  # ==========================================================
+  # 将本地温度发布到Cyphal网络 (发送到其他节点)
+  # DSDL类型: uavcan.si.sample.temperature.Scalar
+  # subject_id: 3002 (其他节点订阅此ID接收温度)
+  # ==========================================================
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Cyphal Temperature Publisher"
+    subject_id: 3002
+    dsdl_type: "uavcan.si.sample.temperature.Scalar"
+    type: publish
+    source_sensor: local_temp
+    publish_interval: 5s
+  
+  # ==========================================================
+  # 将本地湿度发布到Cyphal网络 (发送到其他节点)
+  # DSDL类型: uavcan.primitive.scalar.Real32 (湿度没有标准DSDL类型，用Real32)
+  # subject_id: 3003 (其他节点订阅此ID接收湿度)
+  # ==========================================================
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Cyphal Humidity Publisher"
+    subject_id: 3003
+    dsdl_type: "uavcan.primitive.scalar.Real32"
+    type: publish
+    source_sensor: local_humidity
+    publish_interval: 5s
+  
+  # ==========================================================
+  # 从其他节点接收温度 (其他节点发布到subject_id 3001)
+  # ==========================================================
+  # - platform: cyphal
+  #   cyphal_id: my_cyphal
+  #   name: "Remote Temperature"
+  #   subject_id: 3001
+  #   dsdl_type: "uavcan.si.sample.temperature.Scalar"
+  #   type: subscribe
+  #   extent: 256
+  
+  # ==========================================================
+  # 压力传感器
+  # 支持: uavcan.si.sample.pressure.Scalar
+  # ==========================================================
+  # - platform: cyphal
+  #   cyphal_id: my_cyphal
+  #   name: "Remote Pressure"
+  #   subject_id: 3003
+  #   dsdl_type: "uavcan.si.sample.pressure.Scalar"
+  #   type: subscribe
+  #   extent: 256
+  
+  # ==========================================================
+  # 功率传感器
+  # 支持: uavcan.si.sample.power.Scalar
+  # ==========================================================
+  # - platform: cyphal
+  #   cyphal_id: my_cyphal
+  #   name: "Remote Power"
+  #   subject_id: 3004
+  #   dsdl_type: "uavcan.si.sample.power.Scalar"
+  #   type: subscribe
+  #   extent: 256
+  
+  # ==========================================================
+  # 电压传感器
+  # 支持: uavcan.si.sample.voltage.Scalar
+  # ==========================================================
+  # - platform: cyphal
+  #   cyphal_id: my_cyphal
+  #   name: "Remote Voltage"
+  #   subject_id: 3005
+  #   dsdl_type: "uavcan.si.sample.voltage.Scalar"
+  #   type: subscribe
+  #   extent: 256
+  
+  # ==========================================================
+  # 电流传感器
+  # 支持: uavcan.si.sample.electric_current.Scalar
+  # ==========================================================
+  # - platform: cyphal
+  #   cyphal_id: my_cyphal
+  #   name: "Remote Current"
+  #   subject_id: 3006
+  #   dsdl_type: "uavcan.si.sample.electric_current.Scalar"
+  #   type: subscribe
+  #   extent: 256
+  
+  # ==========================================================
+  # 通用数值传感器 - 使用Real32
+  # 支持: uavcan.primitive.scalar.Real32
+  # ==========================================================
+  # - platform: cyphal
+  #   cyphal_id: my_cyphal
+  #   name: "Generic Sensor Value"
+  #   subject_id: 3007
+  #   dsdl_type: "uavcan.primitive.scalar.Real32"
+
+  # ============================================================
+  # Cyphal 能源传感器示例
+  # 通过YAML配置dsdl_type，支持任意能源类型
+  # ============================================================
+  # 功率传感器
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Power Consumption"
+    subject_id: 8001
+    dsdl_type: "uavcan.si.sample.power.Scalar"
+    extent: 256
+    unit_of_measurement: "W"
+    device_class: power
+  
+  # 电压传感器
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Battery Voltage"
+    subject_id: 8002
+    dsdl_type: "uavcan.si.sample.voltage.Scalar"
+    type: subscribe
+    extent: 256
+    unit_of_measurement: "V"
+    device_class: voltage
+  
+  # 电流传感器
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Battery Current"
+    subject_id: 8003
+    dsdl_type: "uavcan.si.sample.electric_current.Scalar"
+    type: subscribe
+    extent: 256
+    unit_of_measurement: "A"
+    device_class: current
+  
+  # 能量传感器
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Energy Used"
+    subject_id: 8004
+    dsdl_type: "uavcan.si.sample.energy.Scalar"
+    type: subscribe
+    extent: 256
+    unit_of_measurement: "Wh"
+    device_class: energy
+  #   type: subscribe
+  #   extent: 256
+  
+  # ==========================================================
+  # 更多支持的传感器类型:
+  # - uavcan.si.sample.length.Scalar (长度/距离)
+  # - uavcan.si.sample.velocity.Scalar (速度)
+  # - uavcan.si.sample.acceleration.Scalar (加速度)
+  # - uavcan.si.sample.mass.Scalar (质量)
+  # - uavcan.si.sample.force.Scalar (力)
+  # - uavcan.si.sample.torque.Scalar (扭矩)
+  # - uavcan.si.sample.frequency.Scalar (频率)
+  # - uavcan.si.sample.angle.Scalar (角度)
+  # - uavcan.si.sample.angular_velocity.Scalar (角速度)
+  # - uavcan.si.sample.electric_charge.Scalar (电荷)
+  # - uavcan.si.sample.luminance.Scalar (亮度)
+  # - uavcan.si.sample.duration.Scalar (持续时间)
+  # - uavcan.si.sample.volume.Scalar (体积)
+  # - uavcan.si.sample.volumetric_flow_rate.Scalar (体积流量)
+  # - uavcan.si.sample.magnetic_field_strength.Scalar (磁场强度，单位: A/m)
+  # - uavcan.si.sample.magnetic_flux_density.Scalar (磁通密度，单位: Tesla)
+  # ==========================================================
+
+# ============================================================
+# Cyphal 开关模块示例
+# 使用标准DSDL: uavcan.primitive.scalar.Bit
+# ============================================================
+switch:
+  # 从Cyphal网络接收开关命令
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Remote Controlled Switch"
+    subject_id: 4000
+    dsdl_type: "uavcan.primitive.scalar.Bit"
+    type: subscribe
+    extent: 32
+  
+  # 发布开关状态到Cyphal网络
+  # - platform: cyphal
+  #   cyphal_id: my_cyphal
+  #   name: "Published Switch State"
+  #   subject_id: 4001
+  #   dsdl_type: "uavcan.primitive.scalar.Bit"
+  #   type: publish
+  #   source_switch: local_switch
+
+# ============================================================
+# Cyphal 灯光模块示例
+# 使用标准DSDL:
+# - uavcan.primitive.scalar.Natural8 (亮度 0-255)
+# - reg.udral.physics.optics.HighColor (RGB565)
+# ============================================================
+# light:
+#   # 从Cyphal网络接收亮度控制命令
+#   - platform: cyphal
+#     cyphal_id: my_cyphal
+#     name: "Remote Controlled Light"
+#     subject_id: 5000
+#     dsdl_type: "uavcan.primitive.scalar.Natural8"
+#     type: subscribe
+#     extent: 64
+  
+#   # 从Cyphal网络接收RGB控制命令
+#   - platform: cyphal
+#     cyphal_id: my_cyphal
+#     name: "Remote RGB Light"
+#     subject_id: 5001
+#     dsdl_type: "reg.udral.physics.optics.HighColor"
+#     type: subscribe
+#     extent: 64
+
+# ============================================================
+# Cyphal 网关模式示例 (取消注释以启用)
+# 网关使用标准DSDL类型进行HA和Cyphal之间的数据转换
+# ============================================================
+# cyphal:
+#   id: my_cyphal_gateway
+#   canbus_id: can_bus
+#   node_id: 1
+#   mode: gateway  # 网关模式
+#   
+#   # Home Assistant <-> Cyphal 映射
+#   gateway:
+#     cyphal_id: my_cyphal_gateway
+#     # HA实体 -> Cyphal主题
+#     ha_to_cyphal:
+#       # 温度传感器 -> uavcan.si.sample.temperature.Scalar
+#       - entity_id: "sensor.temperature"
+#         subject_id: 6000
+#         bidirectional: true
+#         extent: 256
+#       # 开关 -> uavcan.primitive.scalar.Bit
+#       - entity_id: "switch.light"
+#         subject_id: 6001
+#         bidirectional: true
+#         extent: 32
+#     # Cyphal主题 -> HA实体
+#     cyphal_to_ha:
+#       # uavcan.si.sample.temperature.Scalar -> 温度传感器
+#       - subject_id: 6002
+#         entity_id: "sensor.remote_temp"
+#         extent: 256
+#       # uavcan.primitive.scalar.Bit -> 二进制传感器
+#       - subject_id: 6003
+#         entity_id: "binary_sensor.remote_motion"
+#         extent: 32
+
+# ============================================================
+# 二进制传感器示例
+# 使用标准DSDL: uavcan.primitive.scalar.Bit
+# ============================================================
+binary_sensor:
+  # 从Cyphal网络接收二进制状态
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Remote Binary Sensor"
+    subject_id: 7000
+    dsdl_type: "uavcan.primitive.scalar.Bit"
+    type: subscribe
+    extent: 32
+  
+  # 发布二进制状态到Cyphal网络
+  # - platform: cyphal
+  #   cyphal_id: my_cyphal
+  #   name: "Published Binary State"
+  #   subject_id: 7001
+  #   dsdl_type: "uavcan.primitive.scalar.Bit"
+  #   type: publish
+  #   source_sensor: local_binary_sensor
+
+# ============================================================
+# DALI 网关配置 (两路 DALI)
+# ============================================================
+dali:
+  - id: dali_bus_1
+    tx_pin: GPIO17
+    rx_pin: GPIO16
+    timer_num: 0
+    cyphal_id: my_cyphal
+    mappings:
+      # Cyphal Subject 6000 -> DALI 短地址 3 (使用 Natural8)
+      - subject_id: 6000
+        address: 3
+        address_type: SHORT
+        dsdl_type: "uavcan.primitive.scalar.Natural8"
+      # Cyphal Subject 6001 -> DALI 组地址 1 (使用 Bit)
+      - subject_id: 6001
+        address: 1
+        address_type: GROUP
+        dsdl_type: "uavcan.primitive.scalar.Bit"
+
+  - id: dali_bus_2
+    tx_pin: GPIO18
+    rx_pin: GPIO19
+    timer_num: 1
+    cyphal_id: my_cyphal
+
+# ============================================================
+# DALI 灯光实体
+# ============================================================
+light:
+  # DALI 灯 1 (总线 1)
+  - platform: dali
+    dali_id: dali_bus_1
+    name: "Dali Light 1"
+    address: 3
+    address_type: SHORT
+
+  # DALI 组 1 (总线 1)
+  - platform: dali
+    dali_id: dali_bus_1
+    name: "Dali Group 1"
+    address: 1
+    address_type: GROUP
+
+  # DALI 广播 (总线 2)
+  - platform: dali
+    dali_id: dali_bus_2
+    name: "Dali Bus 2 Broadcast"
+    address: 255
+    address_type: BROADCAST
+
+  # 从Cyphal网络接收亮度控制命令
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Remote Controlled Light"
+    subject_id: 5000
+    dsdl_type: "uavcan.primitive.scalar.Natural8"
+    type: subscribe
+    extent: 8  # Natural8 is 1 byte (8 bits)
+  
+  # 从Cyphal网络接收RGB控制命令
+  - platform: cyphal
+    cyphal_id: my_cyphal
+    name: "Remote RGB Light"
+    subject_id: 5001
+    dsdl_type: "reg.udral.physics.optics.HighColor"
+    type: subscribe
+    extent: 16 # RGB565 is 2 bytes (16 bits)
+# ============================================================
+# 可用的标准DSDL类型参考
+# ============================================================
+# uavcan.primitive.scalar:
+#   - Bit_1_0 (布尔值)
+#   - Natural8_1_0, Natural16_1_0, Natural32_1_0, Natural64_1_0 (无符号整数)
+#   - Integer8_1_0, Integer16_1_0, Integer32_1_0, Integer64_1_0 (有符号整数)
+#   - Real16_1_0, Real32_1_0, Real64_1_0 (浮点数)
+#
+# uavcan.si.sample:
+#   - temperature.Scalar_1_0 (温度，单位: 开尔文)
+#   - pressure.Scalar_1_0 (压力，单位: 帕斯卡)
+#   - power.Scalar_1_0 (功率，单位: 瓦特)
+#   - voltage.Scalar_1_0 (电压，单位: 伏特)
+#   - electric_current.Scalar_1_0 (电流，单位: 安培)
+#   - energy.Scalar_1_0 (能量，单位: 焦耳)
+#   - electric_charge.Scalar_1_0 (电荷，单位: 库仑)
+#   - length.Scalar_1_0 (长度，单位: 米)
+#   - mass.Scalar_1_0 (质量，单位: 千克)
+#   - ... (更多SI单位类型)
+#
+# reg.udral.physics.optics:
+#   - HighColor_0_1 (RGB565颜色)
+#
+# uavcan.node:
+#   - Heartbeat_1_0 (节点心跳)
+#   - Mode_1_0 (节点模式)
+#   - Health_1_0 (节点健康状态)
